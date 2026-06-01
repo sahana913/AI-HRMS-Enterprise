@@ -82,6 +82,15 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
   const [batchResults, setBatchResults] = useState([]);
   const [batchSummary, setBatchSummary] = useState(null);
   const [dashboard, setDashboard] = useState({ totals: {}, candidates: [], charts: {}, insights: {} });
+  const [aiStatus, setAiStatus] = useState(null);
+
+  useEffect(() => {
+    api.get('/api/ai/status').then((r) => setAiStatus(r.data)).catch(() => {});
+    const interval = setInterval(() => {
+      api.get('/api/ai/status').then((r) => setAiStatus(r.data)).catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const loadDashboard = async () => {
     try {
@@ -225,6 +234,27 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
   return (
     <div className="space-y-5">
       <Topbar title={mode === 'ats' ? 'ATS Analyzer' : 'AI Resume Screening'} />
+
+      {/* AI Engine Status Banner */}
+      {aiStatus && (
+        <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-sm font-bold ${
+          aiStatus.model_loaded
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300'
+            : aiStatus.model_loading
+            ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300'
+            : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300'
+        }`}>
+          <span className={`h-2.5 w-2.5 rounded-full ${
+            aiStatus.model_loaded ? 'bg-emerald-500' : aiStatus.model_loading ? 'animate-pulse bg-amber-500' : 'bg-blue-500'
+          }`} />
+          <span>
+            AI Engine: <strong>{aiStatus.scoring_mode === 'semantic' ? 'Semantic (SentenceTransformer)' : aiStatus.model_loading ? 'Loading model...' : 'Lexical (fast fallback)'}</strong>
+            {' — '}{aiStatus.model_name}
+            {aiStatus.model_loading && ' — First ATS screen will be fast using lexical scoring while model loads in background.'}
+            {!aiStatus.model_loaded && !aiStatus.model_loading && ' — Semantic model not loaded. Using fast lexical scoring. Results are instant.'}
+          </span>
+        </div>
+      )}
 
       <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         <MiniMetric label="Total Resumes Uploaded" value={totals.uploaded} icon={UploadCloud} />

@@ -148,6 +148,13 @@ async def lifespan(app: FastAPI):
         print("Database ready.")
     except Exception as e:
         print(f"Database startup warning: {e}")
+    # Preload AI model in background — server stays responsive immediately
+    try:
+        from ai_module.processor import preload_embedding_model
+        asyncio.create_task(preload_embedding_model())
+        print("[AI] Embedding model preloading in background...")
+    except Exception as e:
+        print(f"[AI] Model preload skipped: {e}")
     yield
     close_database()
 
@@ -1011,6 +1018,18 @@ async def process_stored_resume(jd: str, upload: UploadFile, user: dict) -> dict
             {"$set": {"parsing_status": "failed", "status": "failed", "updated_at": now_iso()}},
         )
         raise
+
+@app.get("/api/ai/status")
+async def ai_status():
+    from ai_module.processor import _model_ready, _model_loading, _embed_model
+    return {
+        "model_ready": _model_ready,
+        "model_loading": _model_loading,
+        "model_loaded": _embed_model is not None,
+        "scoring_mode": "semantic" if _embed_model is not None else "lexical",
+        "model_name": os.getenv("SENTENCE_TRANSFORMER_MODEL", "all-MiniLM-L6-v2"),
+    }
+
 
 @app.get("/api/analytics/summary")
 async def get_summary(user: dict = Depends(get_current_user)):
