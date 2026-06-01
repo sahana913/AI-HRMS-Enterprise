@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+**/node_modules/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend build output
+frontend/dist/
+frontend/build/
+dist/
+build/
+
+# Runtime/generated files
+backend/uploads/
+uploads/
+*.log
+*.out.log
+*.err.log
+query
+
+# Local databases and caches
+mongodb_data/
+mongodb_runtime_data/
+.cache/
+frontend/.npm-cache/
+frontend/.edge-profile-*/
+frontend/.chrome-profile-*/
+frontend/.git.frontend-backup/
+*.sqlite*
+
+# Environment files
+.env
+**/.env
+.env.local
+backend/.env
+frontend/.env.local
+frontend/.env
+frontend/.env.development
+frontend/.env.production
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
