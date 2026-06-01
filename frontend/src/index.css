@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: #f6f8fb;
+  --surface: rgba(255, 255, 255, 0.92);
+  --surface-strong: #ffffff;
+  --surface-soft: rgba(248, 250, 252, 0.9);
+  --line: rgba(15, 23, 42, 0.1);
+  --muted: #64748b;
+  --brand: #7c3aed;
+  --brand-mid: #8b5cf6;
+  --brand-2: #06b6d4;
+  --blue: #3b82f6;
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at 18% -12%, rgba(124, 58, 237, 0.09), transparent 30%),
+    radial-gradient(circle at 88% 0%, rgba(6, 182, 212, 0.08), transparent 26%),
+    linear-gradient(135deg, #f8fafc 0%, #f1f5f9 48%, #eef2f7 100%);
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+input, textarea, button, select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(56, 189, 248, 0.35);
+}
+
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.6);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .premium-panel {
+    @apply rounded-lg border border-slate-200/80 bg-white/95 shadow-[0_14px_44px_rgba(15,23,42,0.08)] backdrop-blur-2xl;
+  }
+
+  .premium-panel-strong {
+    @apply rounded-lg border border-slate-200 bg-white shadow-[0_18px_60px_rgba(15,23,42,0.10)] backdrop-blur-2xl;
+  }
+
+  .premium-input {
+    @apply rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-950 placeholder:text-slate-400 outline-none transition focus:border-blue-500/70 focus:bg-white focus:ring-2 focus:ring-blue-500/10;
+  }
+
+  .premium-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2.5 text-sm font-semibold transition duration-200 hover:-translate-y-0.5 active:translate-y-0;
+  }
+
+  .premium-chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600;
+  }
+
+  .glass-card {
+    @apply rounded-lg border border-slate-200/80 bg-white/90 shadow-[0_18px_70px_rgba(15,23,42,0.10)] backdrop-blur-2xl;
+  }
+
+  .metric-label {
+    @apply text-[10px] font-black uppercase tracking-[0.2em] text-slate-500;
+  }
+
+  .enterprise-grid-bg {
+    background-image:
+      linear-gradient(rgba(255,255,255,0.032) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(15,23,42,0.045) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: linear-gradient(to bottom, black, transparent 88%);
+  }
+
+  .surface-highlight {
+    background:
+      linear-gradient(135deg, rgba(124, 58, 237, 0.14), rgba(6, 182, 212, 0.08)),
+      rgba(255, 255, 255, 0.82);
+  }
+}
+
+.ai-saas-landing {
+  position: relative;
+  background:
+    radial-gradient(circle at 14% 4%, rgba(99, 102, 241, 0.18), transparent 32%),
+    radial-gradient(circle at 86% 0%, rgba(6, 182, 212, 0.13), transparent 28%),
+    linear-gradient(135deg, #f8fbff 0%, #edf4ff 48%, #f8fafc 100%);
+}
+
+.ai-saas-landing::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(15,23,42,0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15,23,42,0.045) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,0.62), transparent 78%);
+}
+
+.ai-saas-landing .bg-white,
+.ai-saas-landing .bg-white\/85,
+.ai-saas-landing .bg-slate-50,
+.ai-saas-landing .bg-slate-100 {
+  background-color: rgba(255, 255, 255, 0.68) !important;
+  backdrop-filter: blur(22px);
+}
+
+.ai-saas-landing .border-slate-200,
+.ai-saas-landing .border-slate-200\/70 {
+  border-color: rgba(255, 255, 255, 0.72) !important;
+}
+
+.ai-saas-landing .rounded-2xl,
+.ai-saas-landing .rounded-3xl {
+  box-shadow: 0 18px 70px rgba(79, 70, 229, 0.10);
+}
+
+.ai-saas-landing .bg-slate-950 {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(79,70,229,0.22), transparent 32%),
+    linear-gradient(135deg, rgba(15,23,42,0.94), rgba(30,41,59,0.9)) !important;
+}
+
+.ai-saas-landing a,
+.ai-saas-landing button,
+.ai-saas-landing .rounded-2xl,
+.ai-saas-landing .rounded-3xl {
+  transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease, background-color 220ms ease;
+}
+
+.ai-saas-landing .rounded-2xl:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 26px 80px rgba(37, 99, 235, 0.14);
+}
+
+.workspace-premium {
+  background:
+    radial-gradient(circle at 14% -6%, rgba(99,102,241,0.18), transparent 32%),
+    radial-gradient(circle at 92% 0%, rgba(6,182,212,0.11), transparent 30%),
+    linear-gradient(135deg, #f8fbff 0%, #eef4ff 48%, #f8fafc 100%);
+}
+
+.workspace-premium .premium-panel,
+.workspace-premium .premium-panel-strong,
+.workspace-premium .glass-card {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 70px rgba(79, 70, 229, 0.10);
+}
+
+.workspace-premium .premium-panel:hover {
+  box-shadow: 0 24px 86px rgba(37, 99, 235, 0.13);
+}
+
+.workspace-premium .premium-chip {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(147, 197, 253, 0.48);
+}
+
+.workspace-premium .premium-input {
+  background: rgba(255, 255, 255, 0.76);
+  border-color: rgba(203, 213, 225, 0.78);
+}
+
+.dark .workspace-premium {
+  background:
+    radial-gradient(circle at 14% -6%, rgba(37,99,235,0.18), transparent 32%),
+    radial-gradient(circle at 92% 0%, rgba(20,184,166,0.11), transparent 30%),
+    linear-gradient(135deg, #07111f 0%, #111827 48%, #0f172a 100%);
+  color: #f8fafc;
+}
+
+.dark .workspace-premium .premium-panel,
+.dark .workspace-premium .premium-panel-strong,
+.dark .workspace-premium .glass-card {
+  background: rgba(15, 23, 42, 0.76);
+  border-color: rgba(148, 163, 184, 0.18);
+  box-shadow: 0 18px 70px rgba(2, 6, 23, 0.34);
+}
+
+.dark .workspace-premium header,
+.dark .workspace-premium aside,
+.dark .workspace-premium .bg-white,
+.dark .workspace-premium .bg-white\/58,
+.dark .workspace-premium .bg-white\/72,
+.dark .workspace-premium .bg-white\/76,
+.dark .workspace-premium .bg-white\/86,
+.dark .workspace-premium .bg-white\/90,
+.dark .workspace-premium .bg-white\/95 {
+  background-color: rgba(15, 23, 42, 0.82) !important;
+  color: #f8fafc;
+}
+
+.dark .workspace-premium .bg-slate-50,
+.dark .workspace-premium .bg-slate-100 {
+  background-color: rgba(30, 41, 59, 0.72) !important;
+}
+
+.dark .workspace-premium .text-slate-950 {
+  color: #f8fafc !important;
+}
+
+.dark .workspace-premium .text-slate-700,
+.dark .workspace-premium .text-slate-600,
+.dark .workspace-premium .text-slate-500 {
+  color: #cbd5e1 !important;
+}
+
+.dark .workspace-premium .border-slate-200,
+.dark .workspace-premium .border-slate-200\/80 {
+  border-color: rgba(148, 163, 184, 0.22) !important;
+}
+
+.enterprise-landing-light .text-white {
+  color: #0f172a;
+}
+
+.enterprise-landing-light .text-slate-200,
+.enterprise-landing-light .text-slate-300,
+.enterprise-landing-light .text-slate-400 {
+  color: #475569;
+}
+
+.enterprise-landing-light .text-cyan-200,
+.enterprise-landing-light .text-cyan-300,
+.enterprise-landing-light .text-violet-200,
+.enterprise-landing-light .text-violet-300 {
+  color: #2563eb;
+}
+
+.enterprise-landing-light .text-transparent {
+  color: transparent;
+}
+
+.enterprise-landing-light .border-white\/10 {
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.enterprise-landing-light [class*="bg-[#0B1020]"],
+.enterprise-landing-light .bg-slate-950\/55,
+.enterprise-landing-light .bg-slate-950\/80,
+.enterprise-landing-light .bg-slate-950\/85 {
+  background-color: rgba(255, 255, 255, 0.92);
+}
+
+@media print {
+  aside,
+  header,
+  button {
+    display: none !important;
+  }
+}

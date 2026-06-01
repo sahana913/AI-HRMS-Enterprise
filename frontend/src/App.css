@@ -1,0 +1,18 @@
+/* App.css - application-level styles */
+
+/* Utility: ensure the app root and body have full height */
+html, body, #root {
+  min-height: 100%;
+}
+
+/* Basic background and typography to match the app theme */
+body {
+  margin: 0;
+  background: radial-gradient(circle at top, rgba(56, 189, 248, 0.04), transparent 22%),
+    radial-gradient(circle at bottom right, rgba(125, 211, 252, 0.02), transparent 20%),
+    #020617;
+  color: #e6eef7;
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+}
+
+/* Keep this file minimal; primary styling comes from Tailwind (index.css) */
