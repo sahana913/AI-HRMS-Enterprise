@@ -81,6 +81,7 @@ The backend needs these required variables:
 
 ```env
 APP_MODE=production
+PYTHON_VERSION=3.11.9
 JWT_SECRET=replace-with-a-long-random-secret
 MONGO_URI=mongodb+srv://USER:PASSWORD@cluster-name.mongodb.net/hrms_pro?retryWrites=true&w=majority
 CORS_ORIGINS=https://your-frontend-domain.com
@@ -129,6 +130,7 @@ Start Command: cd backend && python -m uvicorn main:app --host 0.0.0.0 --port $P
 
 ```env
 APP_MODE=production
+PYTHON_VERSION=3.11.9
 JWT_SECRET=your-generated-secret
 MONGO_URI=your-mongodb-atlas-uri
 CORS_ORIGINS=https://your-frontend-domain.com
@@ -403,4 +405,3 @@ Before sharing the app publicly, confirm:
 - Login/register works.
 - Resume upload works.
 - Email OTP works, or you are okay with the fallback behavior.
-
