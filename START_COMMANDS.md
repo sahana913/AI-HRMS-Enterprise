@@ -48,7 +48,14 @@ http://localhost:5173
 Backend API runs here:
 
 ```text
-http://127.0.0.1:5000
+http://127.0.0.1:5002
+```
+
+The backend script uses port `5002` by default because some Windows setups reserve or block `5000`. To override it for another environment:
+
+```powershell
+$env:BACKEND_PORT="5000"
+.\scripts\start-backend-dev.ps1
 ```
 
 ## Option 2: If You Are Already Inside Backend Folder
@@ -69,7 +76,7 @@ netstat -ano | findstr :27017
 Check backend port:
 
 ```powershell
-netstat -ano | findstr :5000
+netstat -ano | findstr :5002
 ```
 
 Check frontend port:

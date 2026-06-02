@@ -48,6 +48,7 @@ function KpiGauge({ value, label, color = '#2563EB' }) {
 export default function AIPerformancePage() {
   const [data, setData] = useState(null);
   const [employees, setEmployees] = useState([]);
+  const [intelligence, setIntelligence] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -104,6 +105,14 @@ export default function AIPerformancePage() {
         employees: enriched,
         trends: trendData,
         deptDistribution: bi.department_distribution || [],
+      });
+      setIntelligence({
+        skillGraph: bi.skill_graph || [],
+        skillGaps: bi.skill_gap_radar || [],
+        internalMatches: bi.internal_talent_marketplace || [],
+        succession: bi.succession_planning || [],
+        burnout: bi.burnout_risk || {},
+        copilot: bi.hr_copilot || {},
       });
       setEmployees(enriched);
     } catch (err) {
@@ -177,6 +186,47 @@ export default function AIPerformancePage() {
             <p className="mt-1 text-xs text-slate-500">{detail}</p>
           </div>
         ))}
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
+        <div className="premium-panel p-5">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="metric-label">AI skill graph</p>
+              <h2 className="text-lg font-black text-slate-950 dark:text-white">Capability demand vs internal coverage</h2>
+            </div>
+            <span className="premium-chip">{intelligence.skillGraph?.length || 0} skills</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {(intelligence.skillGraph || []).slice(0, 6).map((item) => (
+              <div key={item.skill} className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/[0.04]">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-black text-slate-950 dark:text-white">{item.skill}</p>
+                  <span className="text-xs font-black text-cyan-600">{Math.round(item.coverage || 0)}%</span>
+                </div>
+                <div className="mt-3 h-2 rounded-full bg-slate-200 dark:bg-white/10">
+                  <div className="h-2 rounded-full bg-cyan-500" style={{ width: `${Math.min(100, Number(item.coverage || 0))}%` }} />
+                </div>
+                <p className="mt-2 text-xs text-slate-500">{item.employees || 0} employees, {item.candidates || 0} candidates, {item.demand || 0} demand signals</p>
+              </div>
+            ))}
+            {!(intelligence.skillGraph || []).length && <div className="rounded-xl border border-dashed border-slate-300 p-6 text-sm text-slate-500">Add employee skills or screen resumes to generate the skill graph.</div>}
+          </div>
+        </div>
+
+        <div className="premium-panel p-5">
+          <p className="metric-label">HR Copilot actions</p>
+          <div className="mt-4 space-y-3">
+            {(intelligence.copilot?.priority_actions || []).map((item) => (
+              <div key={item} className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm font-bold leading-6 text-blue-800 dark:border-cyan-500/20 dark:bg-cyan-500/10 dark:text-cyan-200">{item}</div>
+            ))}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/[0.04]">
+              <p className="text-sm font-black text-slate-950 dark:text-white">Burnout detection</p>
+              <p className="mt-1 text-2xl font-black text-rose-500">{intelligence.burnout?.score || 0}%</p>
+              <p className="text-xs text-slate-500">{intelligence.burnout?.level || 'Low'} risk based on leave, attendance, and attrition signals.</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Charts row */}

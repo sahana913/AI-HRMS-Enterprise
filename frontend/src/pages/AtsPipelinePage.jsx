@@ -55,6 +55,8 @@ function normalizeCandidate(candidate, index) {
     rank: index + 1,
     owner: candidate.owner || candidate.hr || 'HR',
     tags: skills.slice(0, 4),
+    educationMatch: Math.round(Number(candidate.ats?.education_match ?? candidate.education_match ?? 0)),
+    industryFit: Math.round(Number(candidate.ats?.industry_fit ?? candidate.industry_fit ?? 0)),
     notes: candidate.summary || candidate.ai_recommendation || 'No recruiter notes recorded yet.',
     last: candidate.updated_at || candidate.created_at || '',
   };
@@ -83,6 +85,10 @@ function CandidateCard({ candidate, onDragStart, onSchedule }) {
         <span className={`rounded-full px-2.5 py-1 text-xs font-black ${candidate.score >= 85 ? 'bg-emerald-500/10 text-emerald-500' : candidate.score >= 70 ? 'bg-amber-500/10 text-amber-500' : 'bg-rose-500/10 text-rose-500'}`}>
           {candidate.score} ATS
         </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-bold text-slate-600 dark:text-slate-300">
+        <span className="rounded-full bg-slate-100 px-2 py-1 dark:bg-white/[0.08]">Edu {candidate.educationMatch}%</span>
+        <span className="rounded-full bg-slate-100 px-2 py-1 dark:bg-white/[0.08]">Industry {candidate.industryFit}%</span>
       </div>
       <p className="mt-4 line-clamp-2 text-xs leading-5 text-slate-500">{candidate.notes}</p>
       <div className="mt-4 flex flex-wrap gap-1.5">

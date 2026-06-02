@@ -66,6 +66,14 @@ const emptyStats = {
   recruitment_trends: [],
   attendance_analytics: [],
   payroll_analytics: [],
+  skill_graph: [],
+  skill_gap_radar: [],
+  internal_talent_marketplace: [],
+  succession_planning: [],
+  burnout_risk: {},
+  compliance_monitor: [],
+  payroll_anomalies: [],
+  hr_copilot: {},
 };
 
 function DashboardMetric({ label, value, Icon, detail, index }) {
@@ -117,6 +125,46 @@ const heroPanelClass = 'overflow-hidden rounded-lg border border-slate-200 bg-wh
 const heroKickerClass = 'text-xs font-black uppercase tracking-[0.22em] text-blue-600';
 const heroCopyClass = 'mt-3 max-w-2xl text-sm leading-7 text-slate-600';
 const heroActionClass = 'inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-950 px-3.5 py-2.5 text-sm font-black text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-blue-700';
+
+function AiDifferentiatorPanel({ stats, compact = false }) {
+  const topSkill = stats.skill_gap_radar?.[0]?.skill || stats.skill_graph?.[0]?.skill || 'Skill graph';
+  const topAction = stats.hr_copilot?.priority_actions?.[0] || 'Build the AI HR intelligence layer with live workforce data.';
+  const cards = [
+    [Sparkles, 'AI Skill Graph', topSkill, `${stats.skill_graph?.length || 0} mapped capabilities`],
+    [Users, 'Internal Marketplace', stats.internal_talent_marketplace?.length || 0, 'Employees matched to open skill demand'],
+    [Target, 'Succession Bench', stats.succession_planning?.length || 0, 'Promotion-ready leadership candidates'],
+    [ShieldAlert, 'Burnout Risk', `${stats.burnout_risk?.score || 0}%`, `${stats.burnout_risk?.level || 'Low'} risk level`],
+    [ShieldCheck, 'Compliance Monitor', stats.compliance_monitor?.reduce((sum, item) => sum + Number(item.count || 0), 0) || 0, 'Open HR/security/document signals'],
+    [FileSpreadsheet, 'Payroll Alerts', stats.payroll_anomalies?.length || 0, 'Predictive payroll anomaly checks'],
+  ];
+
+  return (
+    <section className="premium-panel p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="metric-label">AI HR differentiators</p>
+          <h2 className="mt-1 text-lg font-black text-slate-950 dark:text-white">Future-ready intelligence layer</h2>
+        </div>
+        <span className="premium-chip"><Bot size={14} /> Copilot</span>
+      </div>
+      <div className={`mt-4 grid gap-3 ${compact ? 'md:grid-cols-3' : 'md:grid-cols-2 2xl:grid-cols-3'}`}>
+        {cards.map(([Icon, label, value, detail]) => (
+          <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/[0.04]">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-400/10 text-cyan-600 dark:text-cyan-300"><Icon size={18} /></div>
+              <p className="text-xl font-black text-slate-950 dark:text-white">{value}</p>
+            </div>
+            <p className="mt-3 text-sm font-black text-slate-800 dark:text-white">{label}</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm font-semibold leading-6 text-blue-800 dark:border-cyan-500/20 dark:bg-cyan-500/10 dark:text-cyan-200">
+        {topAction}
+      </div>
+    </section>
+  );
+}
 
 function AdminDashboard({ stats, quickActions }) {
   const trend = (stats.recruitment_trends || []).map((item) => ({
@@ -195,6 +243,8 @@ function AdminDashboard({ stats, quickActions }) {
           ['Report exports', stats.report_exports || 0, FileSpreadsheet, 'PDF and Excel packages'],
         ].map(([label, value, Icon, detail], index) => <DashboardMetric key={label} label={label} value={value} Icon={Icon} detail={detail} index={index} />)}
       </section>
+
+      <AiDifferentiatorPanel stats={stats} />
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.82fr]">
         <div className="premium-panel p-5">
@@ -278,6 +328,8 @@ function HrDashboard({ stats, quickActions }) {
           ['Time to hire', `${stats.time_to_hire || 0}d`, Bot, 'Average candidate cycle time'],
         ].map(([label, value, Icon, detail], index) => <DashboardMetric key={label} label={label} value={value} Icon={Icon} detail={detail} index={index} />)}
       </section>
+
+      <AiDifferentiatorPanel stats={stats} compact />
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.85fr]">
         <div className="premium-panel p-5">
@@ -364,6 +416,8 @@ function EmployeeDashboard({ stats, quickActions }) {
           ['Learning', `${stats.learning_progress || 0}%`, FileText, 'Training and growth progress'],
         ].map(([label, value, Icon, detail], index) => <DashboardMetric key={label} label={label} value={value} Icon={Icon} detail={detail} index={index} />)}
       </section>
+
+      <AiDifferentiatorPanel stats={stats} compact />
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.82fr]">
         <div className="premium-panel p-5">
@@ -625,6 +679,8 @@ function CandidateDashboard({ quickActions }) {
               ['Recruiter visibility', `${ats.recruiter_visibility || 0}%`],
               ['Semantic score', `${ats.semantic_score || 0}%`],
               ['Keyword match', `${ats.keyword_match || 0}%`],
+              ['Education match', `${ats.education_match || 0}%`],
+              ['Industry fit', `${ats.industry_fit || 0}%`],
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-500">{label}</p>
@@ -765,6 +821,8 @@ function ManagementAdminDashboard({ stats, quickActions }) {
         ].map(([label, value, Icon, detail], index) => <DashboardMetric key={label} label={label} value={value} Icon={Icon} detail={detail} index={index} />)}
       </section>
 
+      <AiDifferentiatorPanel stats={stats} />
+
       <section className="grid gap-4 xl:grid-cols-[1fr_0.82fr]">
         <div className="premium-panel p-5">
           <div className="mb-4 flex items-center justify-between"><div><p className="metric-label">Hiring analytics</p><h2 className="text-lg font-black text-slate-950 dark:text-white">Recruitment trends</h2></div><span className="premium-chip">6 months</span></div>
@@ -853,6 +911,14 @@ export default function RoleDashboardPage({ role: routeRole }) {
         attendance_analytics: bi.attendance_analytics || [],
         payroll_analytics: bi.payroll_analytics || [],
         project_trends: bi.project_trends || [],
+        skill_graph: bi.skill_graph || [],
+        skill_gap_radar: bi.skill_gap_radar || [],
+        internal_talent_marketplace: bi.internal_talent_marketplace || [],
+        succession_planning: bi.succession_planning || [],
+        burnout_risk: bi.burnout_risk || {},
+        compliance_monitor: bi.compliance_monitor || [],
+        payroll_anomalies: bi.payroll_anomalies || [],
+        hr_copilot: bi.hr_copilot || {},
         leave_requests: bi.kpis?.leave_requests || 0,
         roles: bi.kpis?.roles || 0,
         audit_events: bi.kpis?.audit_events || 0,

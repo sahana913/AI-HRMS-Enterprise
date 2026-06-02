@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Bar, BarChart, CartesianGrid, Cell, Funnel, FunnelChart, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { AlertCircle, Bot, BriefcaseBusiness, CheckCircle2, FileSearch, Gauge, LoaderCircle, Sparkles, Target, UploadCloud } from 'lucide-react';
+import { Activity, AlertCircle, Bot, BriefcaseBusiness, CheckCircle2, FileSearch, Gauge, Layers, LoaderCircle, ServerCog, Sparkles, Target, TimerReset, UploadCloud } from 'lucide-react';
 import api from '../services/api';
 import Topbar from '../components/Topbar';
 
@@ -19,6 +19,9 @@ const emptyJob = {
 };
 
 const statusStyles = {
+  Queued: 'bg-blue-500/10 text-blue-600 border-blue-400/30',
+  Processing: 'bg-cyan-500/10 text-cyan-600 border-cyan-400/30',
+  Completed: 'bg-emerald-500/10 text-emerald-600 border-emerald-400/30',
   Shortlisted: 'bg-emerald-500/10 text-emerald-600 border-emerald-400/30',
   Selected: 'bg-emerald-500/10 text-emerald-600 border-emerald-400/30',
   Review: 'bg-amber-500/10 text-amber-600 border-amber-400/30',
@@ -30,9 +33,12 @@ const scoreOf = (item) => Math.round(Number(item?.ats?.ats_score ?? item?.ats_sc
 const matchOf = (item) => Math.round(Number(item?.ats?.skills_match ?? item?.skill_match_score ?? item?.match_score ?? scoreOf(item)));
 const semanticOf = (item) => Math.round(Number(item?.ats?.semantic_score ?? item?.semantic_score ?? scoreOf(item)));
 const experienceOf = (item) => Math.round(Number(item?.ats?.experience_match ?? item?.experience_match_score ?? 0));
+const educationOf = (item) => Math.round(Number(item?.ats?.education_match ?? item?.education_match ?? 0));
+const industryOf = (item) => Math.round(Number(item?.ats?.industry_fit ?? item?.industry_fit ?? 0));
 const candidateName = (item, fallback = 'Candidate') => item?.candidate_name || item?.name || item?.original_filename?.replace(/\.(pdf|docx)$/i, '') || item?.resume_file?.original_filename?.replace(/\.(pdf|docx)$/i, '') || fallback;
 const resultStatus = (item) => {
   const decision = item?.decision || item?.status;
+  if (['Queued', 'Processing', 'Completed', 'Failed'].includes(decision)) return decision;
   if (decision === 'Selected' || decision === 'Shortlist' || decision === 'shortlisted') return 'Shortlisted';
   if (decision === 'Rejected' || decision === 'rejected') return 'Rejected';
   return scoreOf(item) >= 75 ? 'Shortlisted' : 'Review';
@@ -83,6 +89,8 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
   const [batchSummary, setBatchSummary] = useState(null);
   const [dashboard, setDashboard] = useState({ totals: {}, candidates: [], charts: {}, insights: {} });
   const [aiStatus, setAiStatus] = useState(null);
+  const [monitor, setMonitor] = useState(null);
+  const [activeBatchId, setActiveBatchId] = useState('');
 
   useEffect(() => {
     api.get('/api/ai/status').then((r) => setAiStatus(r.data)).catch(() => {});
@@ -103,6 +111,50 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
 
   useEffect(() => { loadDashboard(); }, []);
 
+  useEffect(() => {
+    const loadMonitor = () => api.get('/api/ats/processing-monitor').then((r) => setMonitor(r.data)).catch(() => {});
+    loadMonitor();
+    const interval = setInterval(loadMonitor, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!activeBatchId) return undefined;
+    let stopped = false;
+    const loadBatch = async () => {
+      try {
+        const response = await api.get(`/api/ats/batches/${activeBatchId}`);
+        if (stopped) return;
+        const data = response.data || {};
+        const items = data.items || data.results || [];
+        setBatchSummary(data);
+        setBatchResults(items.map((item) => ({
+          id: item.id || `${item.filename}-${item.index}`,
+          name: item.filename,
+          upload: 100,
+          parsing: item.status === 'queued' ? 15 : item.status === 'processing' ? 70 : 100,
+          screening: item.status === 'completed' || item.status === 'failed' ? 100 : item.status === 'processing' ? 55 : 8,
+          status: item.status === 'queued' ? 'Queued' : item.status === 'processing' ? 'Processing' : item.status === 'failed' ? 'Failed' : 'Completed',
+          result: item.status === 'completed' ? item : null,
+          error: item.error || '',
+        })));
+        if (data.batch?.status === 'completed' || data.batch?.status === 'failed') {
+          setLoading(false);
+          setActiveBatchId('');
+          await loadDashboard();
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    };
+    loadBatch();
+    const interval = setInterval(loadBatch, 2500);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [activeBatchId]);
+
   const jd = useMemo(() => [
     job.title && `Job Title: ${job.title}`,
     job.department && `Department: ${job.department}`,
@@ -115,7 +167,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
   ].filter(Boolean).join('\n'), [job]);
 
   const addFiles = (fileList) => {
-    const accepted = Array.from(fileList || []).filter((item) => /\.(pdf|docx)$/i.test(item.name));
+    const accepted = Array.from(fileList || []).filter((item) => /\.(pdf|docx|zip)$/i.test(item.name));
     setFiles((current) => {
       const seen = new Set(current.map((item) => `${item.name}-${item.size}`));
       return [...current, ...accepted.filter((item) => !seen.has(`${item.name}-${item.size}`))];
@@ -180,25 +232,11 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
     try {
       setBatchResults((items) => items.map((item) => ({ ...item, upload: 100, parsing: 35, screening: 12, status: 'Parsing' })));
       const response = await api.post('/api/resume-files/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      const results = response.data?.results || [];
       setBatchSummary(response.data);
-      setBatchResults(files.map((file, index) => {
-        const item = results[index] || {};
-        return {
-          id: `${file.name}-${file.size}`,
-          name: file.name,
-          upload: 100,
-          parsing: item.status === 'failed' ? 100 : 100,
-          screening: item.status === 'failed' ? 100 : 100,
-          status: item.status === 'failed' ? 'Failed' : item.parsing_status || 'Completed',
-          result: item.status === 'failed' ? null : item,
-          error: item.error || '',
-        };
-      }));
-      await loadDashboard();
+      setActiveBatchId(response.data?.batch_id || '');
+      setBatchResults((items) => items.map((item) => ({ ...item, upload: 100, parsing: 15, screening: 8, status: 'Queued' })));
     } catch (error) {
       setBatchResults((items) => items.map((item) => ({ ...item, upload: 100, parsing: 100, screening: 100, status: 'Failed', error: error?.response?.data?.detail || 'Batch analysis failed' })));
-    } finally {
       setLoading(false);
     }
   };
@@ -265,6 +303,13 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
         <MiniMetric label="Average ATS Score" value={`${Math.round(totals.averageAts)}%`} icon={Gauge} tone="amber" />
       </section>
 
+      <section className="grid gap-3 md:grid-cols-4">
+        <MiniMetric label="Queue Status" value={monitor ? `${monitor.totals?.queued || 0} queued` : '0 queued'} icon={Layers} />
+        <MiniMetric label="Workers Running" value={monitor ? `${monitor.workers?.active || 0}/${monitor.workers?.configured || 0}` : '0/0'} icon={ServerCog} tone="emerald" />
+        <MiniMetric label="Throughput" value={`${monitor?.throughput_per_minute || 0}/min`} icon={Activity} />
+        <MiniMetric label="Avg Screening Time" value={`${monitor?.average_screening_seconds || 0}s`} icon={TimerReset} tone="amber" />
+      </section>
+
       <section className="grid gap-5 2xl:grid-cols-[0.92fr_1.12fr_0.96fr]">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="premium-panel-strong p-5">
           <div className="flex items-center justify-between gap-3">
@@ -326,7 +371,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
               <p className="metric-label">Bulk resume screening workspace</p>
               <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">Processing command center</h2>
             </div>
-            <span className="premium-chip">PDF / DOCX</span>
+            <span className="premium-chip">PDF / DOCX / ZIP</span>
           </div>
 
           <label
@@ -336,10 +381,10 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
             onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}
             className={`mt-5 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed p-5 text-center transition ${dragging ? 'border-cyan-300 bg-cyan-400/10' : 'border-slate-300 bg-white/60 hover:border-cyan-400 dark:border-white/10 dark:bg-white/[0.04]'}`}
           >
-            <input type="file" accept=".pdf,.docx" multiple className="absolute h-0 w-0 opacity-0" onChange={(event) => addFiles(event.target.files)} />
+            <input type="file" accept=".pdf,.docx,.zip" multiple className="absolute h-0 w-0 opacity-0" onChange={(event) => addFiles(event.target.files)} />
             <UploadCloud className="text-cyan-500" size={30} />
             <p className="mt-3 text-sm font-black text-slate-950 dark:text-white">{files.length ? `${files.length} files queued` : 'Drag resumes here or click to upload'}</p>
-            <p className="mt-1 text-xs text-slate-500">Files are stored in MongoDB-linked secure storage before parsing.</p>
+            <p className="mt-1 text-xs text-slate-500">ZIP archives are expanded into queued PDF/DOCX screening jobs.</p>
           </label>
 
           <div className="mt-4 grid grid-cols-4 gap-2">
@@ -377,7 +422,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
           </div>
 
           <button onClick={handleScreening} disabled={loading || !files.length || !jd.trim()} className="premium-button mt-5 w-full bg-gradient-to-r from-blue-600 to-cyan-400 py-3 text-white shadow-lg shadow-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60">
-            {loading ? <LoaderCircle className="animate-spin" size={16} /> : <Bot size={16} />} Run AI Screening
+            {loading ? <LoaderCircle className="animate-spin" size={16} /> : <Bot size={16} />} {loading ? 'Processing in Background' : 'Queue AI Screening'}
           </button>
         </motion.div>
 
@@ -439,7 +484,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
           <table className="w-full min-w-[980px] text-left text-sm">
             <thead className="text-xs font-black uppercase text-slate-500">
               <tr>
-                {['Candidate Name', 'ATS Score', 'Skill Match', 'Experience Match', 'Semantic Match', 'Missing Skills', 'Recommendation', 'Status'].map((head) => <th key={head} className="px-3 py-3">{head}</th>)}
+                {['Candidate Name', 'ATS Score', 'Skill Match', 'Experience Match', 'Education Match', 'Industry Fit', 'Semantic Match', 'Missing Skills', 'Recommendation', 'Status'].map((head) => <th key={head} className="px-3 py-3">{head}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -452,6 +497,8 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
                     <td className="px-3 py-4 font-black text-cyan-600">{scoreOf(item)}%</td>
                     <td className="px-3 py-4">{matchOf(item)}%</td>
                     <td className="px-3 py-4">{experienceOf(item)}%</td>
+                    <td className="px-3 py-4">{educationOf(item)}%</td>
+                    <td className="px-3 py-4">{industryOf(item)}%</td>
                     <td className="px-3 py-4">{semanticOf(item)}%</td>
                     <td className="px-3 py-4 text-slate-500">{missing.length ? missing.slice(0, 3).join(', ') : 'None'}</td>
                     <td className="px-3 py-4 text-slate-500">{item.summary || item.recommendation || (status === 'Rejected' ? 'Reject or revisit requirements' : status === 'Shortlisted' ? 'Move to interview review' : 'Recruiter review recommended')}</td>
@@ -460,7 +507,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
                 );
               })}
               {!resultRows.length && (
-                <tr><td colSpan="8" className="px-3 py-12 text-center text-sm font-semibold text-slate-500">No screening results found in MongoDB yet.</td></tr>
+                <tr><td colSpan="10" className="px-3 py-12 text-center text-sm font-semibold text-slate-500">No screening results found in MongoDB yet.</td></tr>
               )}
             </tbody>
           </table>

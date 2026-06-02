@@ -13,4 +13,7 @@ foreach ($row in $portRows) {
 }
 
 Set-Location $frontend
+if (-not $env:VITE_API_TARGET) {
+  $env:VITE_API_TARGET = "http://127.0.0.1:5002"
+}
 npm run dev

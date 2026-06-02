@@ -1,3 +1,4 @@
+import asyncio
 import random
 import re
 import os
@@ -7,12 +8,14 @@ import hmac
 import secrets
 import shutil
 import io
+import time
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from bson import ObjectId
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -67,15 +70,19 @@ RESUME_UPLOAD_DIR = UPLOAD_DIR / "resumes"
 PROFILE_IMAGE_UPLOAD_DIR = UPLOAD_DIR / "profile_images"
 DOCUMENT_UPLOAD_DIR = UPLOAD_DIR / "documents"
 ALLOWED_RESUME_EXTENSIONS = {".pdf", ".docx"}
+ALLOWED_BULK_EXTENSIONS = ALLOWED_RESUME_EXTENSIONS | {".zip"}
 ALLOWED_RESUME_MIME_TYPES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/octet-stream",
 }
 MAX_RESUME_FILE_SIZE = int(os.getenv("MAX_RESUME_FILE_SIZE", str(10 * 1024 * 1024)))
+MAX_BULK_ARCHIVE_SIZE = int(os.getenv("MAX_BULK_ARCHIVE_SIZE", str(250 * 1024 * 1024)))
+ATS_BATCH_CONCURRENCY = int(os.getenv("ATS_BATCH_CONCURRENCY", "5"))
 REALTIME_HEARTBEAT_SECONDS = int(os.getenv("REALTIME_HEARTBEAT_SECONDS", "25"))
 DASHBOARD_CACHE_SECONDS = int(os.getenv("DASHBOARD_CACHE_SECONDS", "20"))
 _cache = {}
+_ats_worker_semaphore = asyncio.Semaphore(max(1, ATS_BATCH_CONCURRENCY))
 
 
 def cache_get(key: str):
@@ -828,6 +835,177 @@ def serialize_mongo_like(doc: dict):
     return output
 
 
+class QueuedResumeUpload:
+    def __init__(self, filename: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
+        self.filename = filename
+        self.content_type = content_type
+        self._file_bytes = file_bytes
+
+    async def read(self):
+        return self._file_bytes
+
+
+def bulk_content_type(filename: str) -> str:
+    extension = Path(filename or "").suffix.lower()
+    if extension == ".pdf":
+        return "application/pdf"
+    if extension == ".docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return "application/octet-stream"
+
+
+async def expand_bulk_resume_uploads(files: list[UploadFile]) -> list[dict]:
+    expanded = []
+    for upload in files:
+        filename = upload.filename or "resume"
+        extension = Path(filename).suffix.lower()
+        if extension not in ALLOWED_BULK_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"{filename} is not supported. Upload PDF, DOCX, or ZIP files.")
+        file_bytes = await upload.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail=f"{filename} is empty.")
+        if extension == ".zip":
+            if len(file_bytes) > MAX_BULK_ARCHIVE_SIZE:
+                raise HTTPException(status_code=413, detail=f"{filename} exceeds the maximum ZIP upload size.")
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+                    for member in archive.infolist():
+                        if member.is_dir():
+                            continue
+                        inner_name = Path(member.filename).name
+                        inner_extension = Path(inner_name).suffix.lower()
+                        if inner_extension not in ALLOWED_RESUME_EXTENSIONS:
+                            continue
+                        if member.file_size > MAX_RESUME_FILE_SIZE:
+                            expanded.append({
+                                "filename": inner_name,
+                                "status": "failed",
+                                "error": f"{inner_name} exceeds the maximum resume size.",
+                            })
+                            continue
+                        with archive.open(member) as source:
+                            expanded.append({
+                                "filename": inner_name,
+                                "content_type": bulk_content_type(inner_name),
+                                "file_bytes": source.read(),
+                                "source_archive": filename,
+                            })
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail=f"{filename} is not a valid ZIP archive.")
+            continue
+        expanded.append({
+            "filename": filename,
+            "content_type": upload.content_type or bulk_content_type(filename),
+            "file_bytes": file_bytes,
+            "source_archive": None,
+        })
+    return expanded
+
+
+def summarize_batch_items(items: list[dict], total: int) -> dict:
+    completed_items = [item for item in items if item.get("status") == "completed"]
+    failed = sum(1 for item in items if item.get("status") == "failed")
+    processing = sum(1 for item in items if item.get("status") in {"queued", "processing"})
+    shortlisted = sum(1 for item in completed_items if item.get("decision") in {"Selected", "Shortlist", "Shortlisted"} or item.get("candidate_status") == "shortlisted")
+    rejected = sum(1 for item in completed_items if item.get("decision") == "Rejected" or item.get("candidate_status") == "rejected")
+    review = max(0, len(completed_items) - shortlisted - rejected)
+    interview_ready = sum(1 for item in completed_items if numeric(item.get("ats_score")) >= 75 and item.get("decision") != "Rejected")
+    return {
+        "total": total,
+        "total_uploaded": total,
+        "processed": len(completed_items),
+        "completed": len(completed_items),
+        "processing": processing,
+        "failed": failed,
+        "shortlisted": shortlisted,
+        "review": review,
+        "rejected": rejected,
+        "interview_ready": interview_ready,
+        "pending": max(0, total - len(completed_items) - failed),
+        "processing_progress": round(((len(completed_items) + failed) / total) * 100, 1) if total else 0,
+    }
+
+
+async def refresh_ats_batch(batch_id: str):
+    batch = await db.ats_batches.find_one({"batch_id": batch_id})
+    if not batch:
+        return None
+    items = []
+    async for doc in db.ats_batch_items.find({"batch_id": batch_id}, {"file_bytes": 0}).sort("index", 1):
+        items.append(serialize_mongo_like(doc))
+    summary = summarize_batch_items(items, int(batch.get("total") or len(items)))
+    status = "completed" if summary["processed"] + summary["failed"] >= summary["total"] else "processing"
+    if summary["failed"] and not summary["processed"] and summary["failed"] >= summary["total"]:
+        status = "failed"
+    update = {**summary, "status": status, "updated_at": now_iso()}
+    if status in {"completed", "failed"}:
+        update["completed_at"] = batch.get("completed_at") or now_iso()
+    await db.ats_batches.update_one({"batch_id": batch_id}, {"$set": update})
+    batch.update(update)
+    return {"batch": serialize_mongo_like(batch), "items": items, **summary, "results": items, "ranking": sorted([item for item in items if item.get("status") == "completed"], key=lambda item: numeric(item.get("ats_score")), reverse=True)}
+
+
+async def process_batch_item(batch_id: str, item_id, jd: str, user_snapshot: dict):
+    started = time.perf_counter()
+    item = await db.ats_batch_items.find_one({"_id": item_id})
+    if not item:
+        return
+    async with _ats_worker_semaphore:
+        await db.ats_batch_items.update_one({"_id": item_id}, {"$set": {"status": "processing", "parsing_status": "queued", "started_at": now_iso(), "updated_at": now_iso()}})
+        try:
+            upload = QueuedResumeUpload(item["filename"], item["file_bytes"], item.get("content_type") or bulk_content_type(item["filename"]))
+            result = await process_stored_resume(jd, upload, user_snapshot)
+            score = NumberLike(result.get("ats", {}).get("ats_score") or result.get("score") or 0)
+            update = {
+                "status": "completed",
+                "parsing_status": result.get("resume_file", {}).get("parsing_status", "completed"),
+                "score": result.get("score", 0),
+                "ats_score": score,
+                "decision": result.get("decision"),
+                "candidate_status": "shortlisted" if result.get("decision") in {"Selected", "Shortlist", "Shortlisted"} else "rejected" if result.get("decision") == "Rejected" else "review",
+                "skills": result.get("skills", []),
+                "summary": result.get("summary", ""),
+                "ats": result.get("ats", {}),
+                "resume_file": result.get("resume_file", {}),
+                "candidate_id": result.get("resume_file", {}).get("candidate_id"),
+                "interview_ready": score >= 75 and result.get("decision") != "Rejected",
+                "duration_seconds": round(time.perf_counter() - started, 2),
+                "completed_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+            await db.ats_batch_items.update_one({"_id": item_id}, {"$set": update, "$unset": {"file_bytes": ""}})
+        except Exception as exc:
+            await db.ats_batch_items.update_one(
+                {"_id": item_id},
+                {"$set": {"status": "failed", "parsing_status": "failed", "error": str(exc) if DEV_MODE else "AI Processing Error", "duration_seconds": round(time.perf_counter() - started, 2), "updated_at": now_iso()}, "$unset": {"file_bytes": ""}},
+            )
+        await refresh_ats_batch(batch_id)
+        cache_delete_prefix("ats:")
+        cache_delete_prefix("bi:")
+        cache_delete_prefix("summary:")
+
+
+async def run_ats_batch(batch_id: str, jd: str, user_snapshot: dict):
+    await db.ats_batches.update_one({"batch_id": batch_id}, {"$set": {"status": "processing", "started_at": now_iso(), "updated_at": now_iso()}})
+    items = [doc async for doc in db.ats_batch_items.find({"batch_id": batch_id, "status": "queued"}).sort("index", 1)]
+    tasks = [asyncio.create_task(process_batch_item(batch_id, item["_id"], jd, user_snapshot)) for item in items]
+    if tasks:
+        await asyncio.gather(*tasks)
+    summary = await refresh_ats_batch(batch_id)
+    await db.analytics.insert_one({
+        "scope": "ats",
+        "owner": user_snapshot.get("email"),
+        "event": "batch_screening_completed",
+        "batch_id": batch_id,
+        "total": summary.get("total", 0) if summary else 0,
+        "processed": summary.get("processed", 0) if summary else 0,
+        "shortlisted": summary.get("shortlisted", 0) if summary else 0,
+        "rejected": summary.get("rejected", 0) if summary else 0,
+        "interview_ready": summary.get("interview_ready", 0) if summary else 0,
+        "created_at": now_iso(),
+    })
+
+
 async def process_stored_resume(jd: str, upload: UploadFile, user: dict) -> dict:
     if not (
         has_permission(user.get("role", ""), "ai:screen")
@@ -913,6 +1091,8 @@ async def process_stored_resume(jd: str, upload: UploadFile, user: dict) -> dict
             "email": owner,
             "skills": skills,
             "resume_score": ats["ats_score"],
+            "education_match": ats.get("education_match", 0.0),
+            "industry_fit": ats.get("industry_fit", 0.0),
             "ai_recommendation": decision,
             "status": "selected" if decision == "Selected" else "screening",
             "stage": "Selected" if decision == "Selected" else "Screening",
@@ -946,6 +1126,8 @@ async def process_stored_resume(jd: str, upload: UploadFile, user: dict) -> dict
                 "keyword_match": ats["keyword_match"],
                 "skills_match": ats["skills_match"],
                 "experience_match": ats["experience_match"],
+                "education_match": ats.get("education_match", 0.0),
+                "industry_fit": ats.get("industry_fit", 0.0),
                 "completeness": ats["completeness_score"],
             },
             "structured": structured,
@@ -967,6 +1149,8 @@ async def process_stored_resume(jd: str, upload: UploadFile, user: dict) -> dict
             "ats_score": ats["ats_score"],
             "semantic_score": score,
             "keyword_match": ats["keyword_match"],
+            "education_match": ats.get("education_match", 0.0),
+            "industry_fit": ats.get("industry_fit", 0.0),
             "skill_match_score": ats["skills_match"],
             "experience_match_score": ats["experience_match"],
             "missing_skills": ats["missing_keywords"],
@@ -1195,6 +1379,113 @@ async def business_intelligence_dashboard(user: dict = Depends(get_current_user)
         "attrition_risk": attrition_risk,
         "next_30_days": max(0, employees + new_hires - round((attrition_risk / 100) * max(employees, 1))),
     }
+    skill_counts = {}
+    employee_skill_counts = {}
+    async for doc in db.employees.find(employee_query, {"skills": 1, "department": 1, "position": 1, "name": 1, "email": 1}).limit(1000):
+        raw_skills = doc.get("skills") or []
+        if isinstance(raw_skills, str):
+            raw_skills = re.split(r"[,|]", raw_skills)
+        for skill in raw_skills:
+            label = str(skill or "").strip().title()
+            if label:
+                employee_skill_counts[label] = employee_skill_counts.get(label, 0) + 1
+                skill_counts[label] = skill_counts.get(label, 0) + 1
+    candidate_skill_counts = {}
+    async for doc in db.resume_profiles.find(ats_query, {"extracted_skills": 1, "skills": 1, "missing_skills": 1}).limit(1000):
+        raw_skills = doc.get("extracted_skills") or doc.get("skills") or []
+        if isinstance(raw_skills, str):
+            raw_skills = re.split(r"[,|]", raw_skills)
+        for skill in raw_skills:
+            label = str(skill or "").strip().title()
+            if label:
+                candidate_skill_counts[label] = candidate_skill_counts.get(label, 0) + 1
+                skill_counts[label] = skill_counts.get(label, 0) + 1
+
+    missing_skill_counts = {}
+    async for doc in db.resume_profiles.find(ats_query, {"missing_skills": 1}).limit(1000):
+        for skill in doc.get("missing_skills") or []:
+            label = str(skill or "").strip().title()
+            if label:
+                missing_skill_counts[label] = missing_skill_counts.get(label, 0) + 1
+
+    skill_graph = [
+        {
+            "skill": skill,
+            "employees": employee_skill_counts.get(skill, 0),
+            "candidates": candidate_skill_counts.get(skill, 0),
+            "demand": missing_skill_counts.get(skill, 0),
+            "coverage": round((employee_skill_counts.get(skill, 0) / max(missing_skill_counts.get(skill, 0), 1)) * 100, 1),
+        }
+        for skill in sorted(skill_counts, key=lambda item: skill_counts[item], reverse=True)[:14]
+    ]
+    skill_gap_radar = [
+        {"skill": skill, "gap": count, "urgency": "High" if count >= 5 else "Medium" if count >= 2 else "Low"}
+        for skill, count in sorted(missing_skill_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+
+    demanded = {item["skill"].lower() for item in skill_gap_radar[:6]}
+    internal_matches = []
+    async for employee in db.employees.find(employee_query, {"name": 1, "email": 1, "department": 1, "position": 1, "skills": 1, "performance": 1}).limit(300):
+        raw_skills = employee.get("skills") or []
+        if isinstance(raw_skills, str):
+            raw_skills = re.split(r"[,|]", raw_skills)
+        normalized_skills = {str(skill).strip().lower() for skill in raw_skills if str(skill).strip()}
+        matched = sorted(demanded & normalized_skills)
+        if matched:
+            internal_matches.append({
+                "employee": employee.get("name") or employee.get("email") or "Employee",
+                "department": employee.get("department") or "Unassigned",
+                "role": employee.get("position") or employee.get("role") or "Employee",
+                "matched_skills": [item.title() for item in matched[:5]],
+                "mobility_score": min(100, 58 + len(matched) * 9 + numeric(employee.get("performance")) * 0.2),
+                "recommendation": "Consider for internal role match or stretch assignment",
+            })
+    internal_matches = sorted(internal_matches, key=lambda item: item["mobility_score"], reverse=True)[:8]
+
+    succession_candidates = []
+    async for employee in db.employees.find(employee_query, {"name": 1, "department": 1, "position": 1, "performance": 1, "skills": 1}).limit(300):
+        raw_skills = employee.get("skills") or []
+        skill_count = len(raw_skills if isinstance(raw_skills, list) else [s for s in re.split(r"[,|]", str(raw_skills)) if s.strip()])
+        readiness = min(100, 52 + skill_count * 4 + numeric(employee.get("performance")) * 0.35)
+        if readiness >= 65:
+            succession_candidates.append({
+                "employee": employee.get("name") or "Employee",
+                "department": employee.get("department") or "Unassigned",
+                "current_role": employee.get("position") or employee.get("role") or "Employee",
+                "readiness": round(readiness, 1),
+                "next_role": "Team Lead" if readiness < 82 else "Department Manager",
+            })
+    succession_candidates = sorted(succession_candidates, key=lambda item: item["readiness"], reverse=True)[:8]
+
+    burnout_score = max(0, min(100, round((leave_total / max(employees, 1)) * 6 + (attendance_total / max(employees, 1)) * 0.3 + attrition_risk * 0.45, 1))) if employees else 0
+    compliance_alerts = [
+        {"area": "Profile completion", "severity": "Medium", "count": await db.employees.count_documents({**employee_query, "$or": [{"email": {"$exists": False}}, {"department": {"$exists": False}}]})},
+        {"area": "Security alerts", "severity": "High" if blocked_alerts else "Low", "count": security_alerts},
+        {"area": "Pending leave approvals", "severity": "Medium", "count": await db.leave_requests.count_documents({"status": {"$regex": "pending", "$options": "i"}})},
+    ]
+    payroll_headcount = numeric(payroll.get("headcount"), employees)
+    payroll_cost = numeric(payroll.get("monthly_cost"))
+    payroll_anomalies = []
+    if payroll_cost and payroll_headcount and payroll_cost / max(payroll_headcount, 1) > 250000:
+        payroll_anomalies.append({"type": "High average payroll cost", "severity": "Review", "value": round(payroll_cost / payroll_headcount, 1)})
+    if payroll_headcount and employees and abs(payroll_headcount - employees) > max(3, employees * 0.1):
+        payroll_anomalies.append({"type": "Payroll headcount mismatch", "severity": "High", "value": abs(payroll_headcount - employees)})
+    if not payroll_anomalies:
+        payroll_anomalies.append({"type": "No major payroll anomaly", "severity": "Low", "value": 0})
+
+    hr_copilot = {
+        "priority_actions": [
+            f"Close top skill gap: {skill_gap_radar[0]['skill']}." if skill_gap_radar else "Build a skill graph by screening resumes and adding employee skills.",
+            f"Review attrition and burnout risk at {max(attrition_risk, burnout_score)}%." if attrition_risk or burnout_score else "Attrition and burnout signals are currently low.",
+            f"Move {shortlisted} shortlisted candidates toward interviews." if shortlisted else "Run AI resume screening to create a shortlist.",
+        ],
+        "policy_questions": ["Leave balance and approval rules", "Payroll anomaly explanation", "Promotion readiness criteria"],
+        "automation_opportunities": [
+            "Auto-create interview question packs from JD and resume.",
+            "Recommend internal employees before external sourcing.",
+            "Notify HR when compliance or payroll signals need review.",
+        ],
+    }
     return cache_set(cache_key, {
         "kpis": {
             "employees": employees,
@@ -1232,6 +1523,14 @@ async def business_intelligence_dashboard(user: dict = Depends(get_current_user)
         "department_performance": department_performance,
         "department_distribution": department_distribution,
         "attrition_analysis": {"risk_score": attrition_risk, "leave_requests": leave_total, "signals": []},
+        "skill_graph": skill_graph,
+        "skill_gap_radar": skill_gap_radar,
+        "internal_talent_marketplace": internal_matches,
+        "succession_planning": succession_candidates,
+        "burnout_risk": {"score": burnout_score, "level": "High" if burnout_score >= 70 else "Medium" if burnout_score >= 40 else "Low", "signals": ["leave load", "attendance density", "attrition risk"]},
+        "compliance_monitor": compliance_alerts,
+        "payroll_anomalies": payroll_anomalies,
+        "hr_copilot": hr_copilot,
         "manager_analytics": {"team_productivity": round((task_done / task_total) * 100, 1) if task_total else 0, "goal_completion": round((goal_done / goal_total) * 100, 1) if goal_total else 0, "attendance_trends": attendance_trends, "performance_trends": project_trends},
         "employee_analytics": {"personal_kpis": {"attendance": attendance_total, "goals": goal_total, "learning": learning_total}, "attendance_trends": attendance_trends, "learning_progress": round((learning_done / learning_total) * 100, 1) if learning_total else 0},
         "heatmap": await bi_activity_heatmap({} if can_see_company or can_see_recruiting else {"owner": owner}),
@@ -1447,6 +1746,13 @@ AI_MODULES = [
     {"id": "workforce_forecast", "name": "AI Workforce Forecasting", "permission": "analytics:workforce"},
     {"id": "attrition_prediction", "name": "AI Attrition Prediction", "permission": "analytics:workforce"},
     {"id": "performance_prediction", "name": "AI Performance Prediction", "permission": "performance:team"},
+    {"id": "skill_graph", "name": "AI Skill Graph", "permission": "analytics:workforce"},
+    {"id": "internal_talent_marketplace", "name": "Internal Talent Marketplace", "permission": "analytics:workforce"},
+    {"id": "succession_planning", "name": "AI Succession Planning", "permission": "analytics:workforce"},
+    {"id": "burnout_detection", "name": "AI Burnout Detection", "permission": "analytics:workforce"},
+    {"id": "compliance_monitor", "name": "Smart Compliance Monitor", "permission": "analytics:workforce"},
+    {"id": "payroll_anomaly", "name": "Predictive Payroll Alerts", "permission": "analytics:workforce"},
+    {"id": "hr_copilot", "name": "AI HR Copilot", "permission": "analytics:workforce"},
 ]
 
 
@@ -1487,6 +1793,18 @@ async def run_ai_module(module_id: str, payload: dict = Body(default={}), user: 
             "completed": done,
             "forecast": "Stable" if not tasks or done / max(tasks, 1) >= 0.65 else "At risk",
         }
+    elif module_id in {"skill_graph", "internal_talent_marketplace", "succession_planning", "burnout_detection", "compliance_monitor", "payroll_anomaly", "hr_copilot"}:
+        dashboard = await business_intelligence_dashboard(user)
+        mapping = {
+            "skill_graph": {"skill_graph": dashboard.get("skill_graph", []), "skill_gap_radar": dashboard.get("skill_gap_radar", [])},
+            "internal_talent_marketplace": {"matches": dashboard.get("internal_talent_marketplace", [])},
+            "succession_planning": {"bench": dashboard.get("succession_planning", [])},
+            "burnout_detection": dashboard.get("burnout_risk", {}),
+            "compliance_monitor": {"alerts": dashboard.get("compliance_monitor", [])},
+            "payroll_anomaly": {"alerts": dashboard.get("payroll_anomalies", [])},
+            "hr_copilot": dashboard.get("hr_copilot", {}),
+        }
+        result = mapping[module_id]
     elif module_id == "interview_questions":
         prompt = f"Generate interview questions for: {job_description or content}"
         questions = [line for line in (await generate_resume_ai("interview", prompt, job_description)).splitlines() if line.strip()]
@@ -1839,6 +2157,7 @@ async def screen_resume(
 @app.post("/api/resume-files/upload")
 @app.post("/api/resumes/upload")
 async def upload_resume_batch(
+    background_tasks: BackgroundTasks,
     jd: str = Form(""),
     files: list[UploadFile] = File(...),
     user: dict = Depends(get_current_user),
@@ -1851,76 +2170,113 @@ async def upload_resume_batch(
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one resume file.")
     batch_id = uuid.uuid4().hex
-    results = []
-    for index, upload in enumerate(files, start=1):
-        try:
-            result = await process_stored_resume(jd, upload, user)
-            results.append({
-                "index": index,
-                "filename": upload.filename,
-                "status": "completed",
-                "parsing_status": result.get("resume_file", {}).get("parsing_status", "completed"),
-                **result,
-            })
-        except HTTPException as exc:
-            results.append({
-                "index": index,
-                "filename": upload.filename,
-                "status": "failed",
-                "error": exc.detail,
-            })
-        except Exception as exc:
-            print(f"Batch resume processing failed for {upload.filename}: {exc}")
-            results.append({
-                "index": index,
-                "filename": upload.filename,
-                "status": "failed",
-                "error": str(exc) if DEV_MODE else "AI Processing Error",
-            })
-
-    ranked = sorted(
-        [item for item in results if item.get("status") == "completed"],
-        key=lambda item: NumberLike(item.get("ats", {}).get("ats_score") or item.get("score") or 0),
-        reverse=True,
-    )
-    for rank, item in enumerate(ranked, start=1):
-        item["rank"] = rank
-        item["interview_ready"] = NumberLike(item.get("ats", {}).get("ats_score") or item.get("score") or 0) >= 75 and item.get("decision") != "Rejected"
-
-    shortlisted = sum(1 for item in results if item.get("decision") in {"Selected", "Shortlist"})
-    rejected = sum(1 for item in results if item.get("decision") == "Rejected")
-    failed = sum(1 for item in results if item.get("status") == "failed")
-    interview_ready = sum(1 for item in results if item.get("interview_ready"))
+    owner = current_user_email(user)
+    expanded_files = await expand_bulk_resume_uploads(files)
+    if not expanded_files:
+        raise HTTPException(status_code=400, detail="No supported resume files were found.")
+    created_at = now_iso()
+    queued = []
+    failed_seed = []
+    for index, item in enumerate(expanded_files, start=1):
+        base_doc = {
+            "batch_id": batch_id,
+            "owner": owner,
+            "index": index,
+            "filename": item.get("filename") or f"resume-{index}",
+            "source_archive": item.get("source_archive"),
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+        if item.get("status") == "failed":
+            failed_seed.append({**base_doc, "status": "failed", "parsing_status": "failed", "error": item.get("error", "Invalid resume file.")})
+            continue
+        queued.append({**base_doc, "status": "queued", "parsing_status": "queued", "content_type": item.get("content_type"), "file_bytes": item.get("file_bytes", b"")})
+    if queued or failed_seed:
+        await db.ats_batch_items.insert_many(queued + failed_seed)
+    await db.ats_batches.insert_one({
+        "batch_id": batch_id,
+        "owner": owner,
+        "uploaded_by": owner,
+        "job_description": jd[:8000],
+        "queues": ["resume_processing_queue", "ai_screening_queue", "candidate_ranking_queue"],
+        "worker_concurrency": ATS_BATCH_CONCURRENCY,
+        "status": "queued" if queued else "failed",
+        "total": len(expanded_files),
+        "total_uploaded": len(expanded_files),
+        "processed": 0,
+        "failed": len(failed_seed),
+        "shortlisted": 0,
+        "rejected": 0,
+        "pending": len(queued),
+        "created_at": created_at,
+        "updated_at": created_at,
+    })
+    user_snapshot = {"email": owner, "role": user.get("role", ""), "name": user.get("name", owner)}
+    if queued:
+        background_tasks.add_task(run_ats_batch, batch_id, jd, user_snapshot)
+    summary = await refresh_ats_batch(batch_id)
     payload = {
         "batch_id": batch_id,
-        "total": len(files),
-        "total_uploaded": len(files),
-        "processed": len(results) - failed,
-        "failed": failed,
-        "shortlisted": shortlisted,
-        "rejected": rejected,
-        "interview_ready": interview_ready,
-        "pending": max(0, len(files) - (len(results) - failed) - failed),
-        "ranking": ranked,
-        "results": results,
+        "status": "queued" if queued else "failed",
+        "message": "Batch accepted for background ATS processing.",
+        "queues": ["resume_processing_queue", "ai_screening_queue", "candidate_ranking_queue"],
+        **({key: value for key, value in (summary or {}).items() if key not in {"batch", "items", "results", "ranking"}}),
     }
-    await db.analytics.insert_one({
-        "scope": "ats",
-        "owner": current_user_email(user),
-        "event": "batch_screening_completed",
-        "batch_id": batch_id,
-        "total": len(files),
-        "processed": payload["processed"],
-        "shortlisted": shortlisted,
-        "rejected": rejected,
-        "interview_ready": interview_ready,
-        "created_at": now_iso(),
-    })
     cache_delete_prefix("ats:")
     cache_delete_prefix("bi:")
     cache_delete_prefix("summary:")
-    await write_activity_log(user, "ATS Batch Screening", "ats_reports", metadata={"batch_id": batch_id, "total": len(files)})
+    await write_activity_log(user, "ATS Batch Queued", "ats_batches", metadata={"batch_id": batch_id, "total": len(expanded_files)})
     return payload
+
+
+@app.get("/api/ats/batches/{batch_id}")
+async def get_ats_batch(batch_id: str, user: dict = Depends(get_current_user)):
+    role = user_role(user)
+    owner = current_user_email(user)
+    batch = await db.ats_batches.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(status_code=404, detail="ATS batch not found")
+    if not has_permission(role, "candidates:manage") and batch.get("owner") != owner:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    summary = await refresh_ats_batch(batch_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="ATS batch not found")
+    ranked = summary.get("ranking", [])
+    for rank, item in enumerate(ranked, start=1):
+        item["rank"] = rank
+    return summary
+
+
+@app.get("/api/ats/processing-monitor")
+async def ats_processing_monitor(user: dict = Depends(get_current_user)):
+    role = user_role(user)
+    owner = current_user_email(user)
+    if not (has_permission(role, "ats:manage") or has_permission(role, "ai:screen") or has_permission(role, "ai:candidate")):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    query = {} if has_permission(role, "candidates:manage") or has_permission(role, "ats:manage") else {"owner": owner}
+    total_batches = await db.ats_batches.count_documents(query)
+    queued = await db.ats_batch_items.count_documents({**query, "status": "queued"})
+    processing = await db.ats_batch_items.count_documents({**query, "status": "processing"})
+    completed = await db.ats_batch_items.count_documents({**query, "status": "completed"})
+    failed = await db.ats_batch_items.count_documents({**query, "status": "failed"})
+    active_batches = await db.ats_batches.count_documents({**query, "status": {"$in": ["queued", "processing"]}})
+    since = datetime.utcnow() - timedelta(minutes=5)
+    recent_cursor = db.ats_batch_items.find({**query, "completed_at": {"$gte": since.isoformat()}}, {"duration_seconds": 1})
+    recent = [doc async for doc in recent_cursor]
+    throughput = round(len(recent) / 5, 1)
+    avg_seconds = round(sum(numeric(item.get("duration_seconds")) for item in recent) / len(recent), 2) if recent else 0
+    return {
+        "queues": {
+            "resume_processing_queue": queued + processing,
+            "ai_screening_queue": processing,
+            "candidate_ranking_queue": max(0, completed - failed),
+        },
+        "workers": {"configured": ATS_BATCH_CONCURRENCY, "active": min(ATS_BATCH_CONCURRENCY, processing), "active_batches": active_batches},
+        "totals": {"batches": total_batches, "queued": queued, "processing": processing, "completed": completed, "failed": failed},
+        "throughput_per_minute": throughput,
+        "average_screening_seconds": avg_seconds,
+        "updated_at": now_iso(),
+    }
 
 
 @app.get("/api/resume-files")

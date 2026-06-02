@@ -211,6 +211,42 @@ def extract_contact_details(text: str) -> dict:
     }
 
 
+def extract_name_from_text(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines[:10]:
+        lower = line.lower()
+        if any(keyword in lower for keyword in ["resume", "experience", "education", "skills", "summary", "profile", "contact", "linkedin", "github"]):
+            continue
+        if re.search(r"[A-Z][a-z]+", line) and len(line.split()) <= 5 and "@" not in line and not re.search(r"\d", line):
+            return line.strip()
+    return ""
+
+
+def extract_location(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines[:15]:
+        if re.search(r"\b(location|based in|city|state|country|remote)\b", line, flags=re.IGNORECASE):
+            cleaned = re.sub(r".*?(location|based in)[:\-]?\s*", "", line, flags=re.IGNORECASE).strip()
+            if cleaned:
+                return cleaned[:80]
+    matches = re.findall(r"\b([A-Z][a-z]+(?:[,\-\s]+[A-Z][a-z]+){0,2})\b", text or "")
+    for candidate in matches:
+        if any(keyword.lower() in candidate.lower() for keyword in ["city", "state", "county", "district"]):
+            return candidate.strip()
+    return ""
+
+
+def extract_languages(text: str) -> List[str]:
+    language_terms = [
+        "English", "Spanish", "French", "German", "Hindi", "Mandarin", "Japanese",
+        "Korean", "Arabic", "Portuguese", "Russian", "Italian", "Urdu", "Tamil", "Telugu",
+        "Gujarati", "Bengali", "Malay", "Vietnamese", "Turkish", "Hebrew",
+    ]
+    normalized = normalize_text(text)
+    found = [term for term in language_terms if re.search(rf"\b{re.escape(term.lower())}\b", normalized)]
+    return sorted(found)[:8]
+
+
 def extract_section_lines(text: str, section_names: List[str], max_items: int = 5) -> List[str]:
     lines = [line.strip(" -\t") for line in (text or "").splitlines() if line.strip()]
     normalized_sections = [n.lower() for n in section_names]
@@ -243,6 +279,9 @@ def extract_structured_resume(text: str) -> dict:
         if re.search(r"\b(increased|reduced|improved|led|launched|delivered|saved|grew|built|managed)\b", line, re.IGNORECASE)
     ][:5]
     return {
+        "name": extract_name_from_text(text),
+        "location": extract_location(text),
+        "languages": extract_languages(text),
         "contact": extract_contact_details(text),
         "education": extract_section_lines(text, ["education", "degree", "university"], 5),
         "certifications": extract_section_lines(text, ["certifications", "certificates"], 5),
@@ -277,9 +316,18 @@ def build_ats_report(jd: str, resume_text: str, semantic_score: float, skills: L
     completeness = completeness_score(resume_text)
     structured = extract_structured_resume(resume_text)
     experience_match = min(100, 45 + (structured["experience_years"] * 8) + (len(structured["experience"]) * 5))
+    education_terms = set(extract_keywords(" ".join(structured.get("education", []))))
+    education_match = round((len(education_terms & set(jd_keywords)) / max(len(jd_keywords), 1)) * 100, 2) if education_terms else 0.0
+    industry_keywords = {
+        "cloud", "finance", "healthcare", "retail", "manufacturing", "saas", "ecommerce",
+        "education", "government", "media", "telecom", "energy", "logistics", "consulting",
+    }
+    industry_match_count = sum(1 for keyword in industry_keywords if keyword in normalize_text(jd) and keyword in normalize_text(resume_text))
+    industry_fit = round(min(100.0, (industry_match_count / max(1, len(industry_keywords))) * 100 * 1.3), 2)
     keyword_match = round((len(matched) / max(len(jd_keywords), 1)) * 100, 2)
     ats_score = round(
-        (semantic_score * 0.38) + (skills_match * 0.26) + (experience_match * 0.18) + (completeness * 0.18), 2
+        (semantic_score * 0.32) + (skills_match * 0.26) + (experience_match * 0.18) + (education_match * 0.12) + (completeness * 0.12),
+        2,
     )
 
     suggestions = []
@@ -291,6 +339,8 @@ def build_ats_report(jd: str, resume_text: str, semantic_score: float, skills: L
         suggestions.append("Mirror the job description language more closely in your summary and achievement bullets.")
     if len(skills) < 6:
         suggestions.append("Add a dedicated skills section with role-specific tools and competencies.")
+    if education_match < 60:
+        suggestions.append("Include more education details and degree context to strengthen academic fit.")
     if not suggestions:
         suggestions.append("Resume is well aligned. Add quantified outcomes to improve recruiter confidence.")
 
@@ -300,6 +350,8 @@ def build_ats_report(jd: str, resume_text: str, semantic_score: float, skills: L
         "keyword_match": keyword_match,
         "skills_match": skills_match,
         "experience_match": experience_match,
+        "education_match": education_match,
+        "industry_fit": industry_fit,
         "completeness_score": completeness,
         "missing_keywords": missing,
         "matched_keywords": matched[:12],
@@ -312,10 +364,10 @@ def build_ats_report(jd: str, resume_text: str, semantic_score: float, skills: L
 # ── Recommendation ────────────────────────────────────────────────────────────
 
 def generate_recommendation(score: float) -> str:
-    if score >= 75:
-        return "Selected"
-    if score >= 50:
-        return "Needs Review"
+    if score >= 85:
+        return "Shortlisted"
+    if score >= 60:
+        return "Review"
     return "Rejected"
 
 

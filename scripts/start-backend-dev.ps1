@@ -2,17 +2,21 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $root "backend"
 $python = Join-Path $root ".venv\Scripts\python.exe"
+$backendPort = $env:BACKEND_PORT
+if (-not $backendPort) {
+  $backendPort = "5002"
+}
 
 if (-not (Test-Path $python)) {
   $python = "python"
 }
 
-$portRows = netstat -ano -p tcp | Select-String ":5000\s+.*LISTENING"
+$portRows = netstat -ano -p tcp | Select-String ":$backendPort\s+.*LISTENING"
 foreach ($row in $portRows) {
   $parts = ($row.ToString() -split "\s+") | Where-Object { $_ }
   $pid = $parts[-1]
   if ($pid -and $pid -ne "0") {
-    Write-Host "Stopping existing backend process on port 5000 (PID $pid)"
+    Write-Host "Stopping existing backend process on port $backendPort (PID $pid)"
     Stop-Process -Id ([int]$pid) -Force -ErrorAction SilentlyContinue
   }
 }
@@ -30,7 +34,7 @@ $uvicornArgs = @(
   "--host",
   "127.0.0.1",
   "--port",
-  "5000",
+  $backendPort,
   "--reload",
   "--reload-dir",
   ".",

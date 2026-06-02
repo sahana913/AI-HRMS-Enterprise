@@ -77,18 +77,20 @@ export default function InterviewsPage() {
           <form onSubmit={handleSubmit} className="mt-5 space-y-4">
             <label className="block text-sm font-semibold text-slate-500">
               Candidate
-              <select
+              <input
+                list="candidate-suggestions"
                 className="premium-input mt-2 w-full"
                 value={form.candidate_id}
                 onChange={(e) => setForm({ ...form, candidate_id: e.target.value })}
+                placeholder="Type candidate name or select from suggestions"
                 required
-              >
-                <option value="">Select a real candidate</option>
+              />
+              <datalist id="candidate-suggestions">
                 {candidates.map((candidate) => {
-                  const id = candidate.id || candidate._id;
-                  return <option key={id} value={id}>{candidate.candidate_name || candidate.name || id}</option>;
+                  const value = candidate.candidate_name || candidate.name || candidate.id || candidate._id;
+                  return <option key={value} value={value} />;
                 })}
-              </select>
+              </datalist>
             </label>
             {['interviewer', 'interview_date'].map((field) => (
               <label key={field} className="block text-sm font-semibold text-slate-500">
@@ -156,7 +158,7 @@ export default function InterviewsPage() {
                     <span>{item.round || item.mode}</span>
                     <span>{item.status}</span>
                   </div>
-                  <p className="mt-3 text-base font-black text-slate-950 dark:text-white">{candidateNameById.get(item.candidate_id) || `Candidate ID: ${item.candidate_id}`}</p>
+                  <p className="mt-3 text-base font-black text-slate-950 dark:text-white">{candidateNameById.get(item.candidate_id) || item.candidate_id || 'Unknown candidate'}</p>
                   <p className="mt-2 text-sm text-slate-500">Interviewer: {item.interviewer}</p>
                   <p className="mt-1 text-sm text-slate-500">{item.interview_date}</p>
                   {item.meeting_link && (
