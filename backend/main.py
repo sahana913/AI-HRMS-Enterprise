@@ -67,6 +67,7 @@ DEV_MODE = os.getenv("APP_MODE", "development").lower() != "production"
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESUME_UPLOAD_DIR = UPLOAD_DIR / "resumes"
+BULK_STAGING_DIR = UPLOAD_DIR / "bulk_staging"
 PROFILE_IMAGE_UPLOAD_DIR = UPLOAD_DIR / "profile_images"
 DOCUMENT_UPLOAD_DIR = UPLOAD_DIR / "documents"
 ALLOWED_RESUME_EXTENSIONS = {".pdf", ".docx"}
@@ -77,7 +78,8 @@ ALLOWED_RESUME_MIME_TYPES = {
     "application/octet-stream",
 }
 MAX_RESUME_FILE_SIZE = int(os.getenv("MAX_RESUME_FILE_SIZE", str(10 * 1024 * 1024)))
-MAX_BULK_ARCHIVE_SIZE = int(os.getenv("MAX_BULK_ARCHIVE_SIZE", str(250 * 1024 * 1024)))
+MAX_BULK_ARCHIVE_SIZE = int(os.getenv("MAX_BULK_ARCHIVE_SIZE", str(2 * 1024 * 1024 * 1024)))
+MAX_BULK_RESUME_COUNT = int(os.getenv("MAX_BULK_RESUME_COUNT", "10000"))
 ATS_BATCH_CONCURRENCY = int(os.getenv("ATS_BATCH_CONCURRENCY", "5"))
 REALTIME_HEARTBEAT_SECONDS = int(os.getenv("REALTIME_HEARTBEAT_SECONDS", "25"))
 DASHBOARD_CACHE_SECONDS = int(os.getenv("DASHBOARD_CACHE_SECONDS", "20"))
@@ -143,7 +145,7 @@ realtime = RealtimeManager()
 
 
 def ensure_upload_directories():
-    for directory in (UPLOAD_DIR, RESUME_UPLOAD_DIR, PROFILE_IMAGE_UPLOAD_DIR, DOCUMENT_UPLOAD_DIR):
+    for directory in (UPLOAD_DIR, RESUME_UPLOAD_DIR, BULK_STAGING_DIR, PROFILE_IMAGE_UPLOAD_DIR, DOCUMENT_UPLOAD_DIR):
         os.makedirs(directory, exist_ok=True)
 
 
@@ -175,12 +177,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 otp_store = {}
 
 # CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if not cors_origins:
+    cors_origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-    ],
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
@@ -845,6 +855,17 @@ class QueuedResumeUpload:
         return self._file_bytes
 
 
+class QueuedResumeFileUpload:
+    def __init__(self, filename: str, file_path: str, content_type: str = "application/octet-stream"):
+        self.filename = filename
+        self.content_type = content_type
+        self.file_path = file_path
+
+    async def read(self):
+        with open(self.file_path, "rb") as source:
+            return source.read()
+
+
 def bulk_content_type(filename: str) -> str:
     extension = Path(filename or "").suffix.lower()
     if extension == ".pdf":
@@ -854,8 +875,36 @@ def bulk_content_type(filename: str) -> str:
     return "application/octet-stream"
 
 
-async def expand_bulk_resume_uploads(files: list[UploadFile]) -> list[dict]:
+def stage_batch_resume(batch_id: str, index: int, filename: str, source) -> str:
+    ensure_upload_directories()
+    safe_name = safe_filename_part(Path(filename or f"resume-{index}").stem)
+    extension = Path(filename or "").suffix.lower()
+    batch_dir = BULK_STAGING_DIR / safe_filename_part(batch_id)
+    os.makedirs(batch_dir, exist_ok=True)
+    staged_path = batch_dir / f"{index:06d}_{uuid.uuid4().hex[:10]}_{safe_name}{extension}"
+    with open(staged_path, "wb") as target:
+        shutil.copyfileobj(source, target)
+    return str(staged_path)
+
+
+def cleanup_staged_resume(file_path: str):
+    if not file_path:
+        return
+    try:
+        resolved = Path(file_path).resolve()
+        base = BULK_STAGING_DIR.resolve()
+        if base in resolved.parents and resolved.is_file():
+            resolved.unlink(missing_ok=True)
+            parent = resolved.parent
+            if parent != base and not any(parent.iterdir()):
+                parent.rmdir()
+    except OSError:
+        return
+
+
+async def expand_bulk_resume_uploads(files: list[UploadFile], batch_id: str) -> list[dict]:
     expanded = []
+    item_index = 0
     for upload in files:
         filename = upload.filename or "resume"
         extension = Path(filename).suffix.lower()
@@ -883,29 +932,42 @@ async def expand_bulk_resume_uploads(files: list[UploadFile]) -> list[dict]:
                                 "error": f"{inner_name} exceeds the maximum resume size.",
                             })
                             continue
+                        item_index += 1
+                        if item_index > MAX_BULK_RESUME_COUNT:
+                            raise HTTPException(status_code=413, detail=f"Batch exceeds the maximum of {MAX_BULK_RESUME_COUNT} resumes.")
                         with archive.open(member) as source:
                             expanded.append({
                                 "filename": inner_name,
                                 "content_type": bulk_content_type(inner_name),
-                                "file_bytes": source.read(),
+                                "file_path": stage_batch_resume(batch_id, item_index, inner_name, source),
                                 "source_archive": filename,
                             })
             except zipfile.BadZipFile:
                 raise HTTPException(status_code=400, detail=f"{filename} is not a valid ZIP archive.")
             continue
+        item_index += 1
+        if item_index > MAX_BULK_RESUME_COUNT:
+            raise HTTPException(status_code=413, detail=f"Batch exceeds the maximum of {MAX_BULK_RESUME_COUNT} resumes.")
         expanded.append({
             "filename": filename,
             "content_type": upload.content_type or bulk_content_type(filename),
-            "file_bytes": file_bytes,
+            "file_path": stage_batch_resume(batch_id, item_index, filename, io.BytesIO(file_bytes)),
             "source_archive": None,
         })
     return expanded
 
 
-def summarize_batch_items(items: list[dict], total: int) -> dict:
-    completed_items = [item for item in items if item.get("status") == "completed"]
-    failed = sum(1 for item in items if item.get("status") == "failed")
-    processing = sum(1 for item in items if item.get("status") in {"queued", "processing"})
+async def summarize_batch_counts(batch_id: str, total: int) -> dict:
+    completed_items = [
+        doc async for doc in db.ats_batch_items.find(
+            {"batch_id": batch_id, "status": "completed"},
+            {"decision": 1, "candidate_status": 1, "ats_score": 1},
+        )
+    ]
+    failed = await db.ats_batch_items.count_documents({"batch_id": batch_id, "status": "failed"})
+    queued = await db.ats_batch_items.count_documents({"batch_id": batch_id, "status": "queued"})
+    processing_count = await db.ats_batch_items.count_documents({"batch_id": batch_id, "status": "processing"})
+    processing = queued + processing_count
     shortlisted = sum(1 for item in completed_items if item.get("decision") in {"Selected", "Shortlist", "Shortlisted"} or item.get("candidate_status") == "shortlisted")
     rejected = sum(1 for item in completed_items if item.get("decision") == "Rejected" or item.get("candidate_status") == "rejected")
     review = max(0, len(completed_items) - shortlisted - rejected)
@@ -926,14 +988,16 @@ def summarize_batch_items(items: list[dict], total: int) -> dict:
     }
 
 
-async def refresh_ats_batch(batch_id: str):
+async def refresh_ats_batch(batch_id: str, item_limit: int = 250):
     batch = await db.ats_batches.find_one({"batch_id": batch_id})
     if not batch:
         return None
     items = []
-    async for doc in db.ats_batch_items.find({"batch_id": batch_id}, {"file_bytes": 0}).sort("index", 1):
+    projection = {"file_bytes": 0, "file_path": 0}
+    async for doc in db.ats_batch_items.find({"batch_id": batch_id}, projection).sort("index", 1).limit(item_limit):
         items.append(serialize_mongo_like(doc))
-    summary = summarize_batch_items(items, int(batch.get("total") or len(items)))
+    total = int(batch.get("total") or 0)
+    summary = await summarize_batch_counts(batch_id, total)
     status = "completed" if summary["processed"] + summary["failed"] >= summary["total"] else "processing"
     if summary["failed"] and not summary["processed"] and summary["failed"] >= summary["total"]:
         status = "failed"
@@ -942,7 +1006,11 @@ async def refresh_ats_batch(batch_id: str):
         update["completed_at"] = batch.get("completed_at") or now_iso()
     await db.ats_batches.update_one({"batch_id": batch_id}, {"$set": update})
     batch.update(update)
-    return {"batch": serialize_mongo_like(batch), "items": items, **summary, "results": items, "ranking": sorted([item for item in items if item.get("status") == "completed"], key=lambda item: numeric(item.get("ats_score")), reverse=True)}
+    ranking = [
+        serialize_mongo_like(doc)
+        async for doc in db.ats_batch_items.find({"batch_id": batch_id, "status": "completed"}, projection).sort("ats_score", -1).limit(item_limit)
+    ]
+    return {"batch": serialize_mongo_like(batch), "items": items, **summary, "results": items, "ranking": ranking}
 
 
 async def process_batch_item(batch_id: str, item_id, jd: str, user_snapshot: dict):
@@ -953,33 +1021,54 @@ async def process_batch_item(batch_id: str, item_id, jd: str, user_snapshot: dic
     async with _ats_worker_semaphore:
         await db.ats_batch_items.update_one({"_id": item_id}, {"$set": {"status": "processing", "parsing_status": "queued", "started_at": now_iso(), "updated_at": now_iso()}})
         try:
-            upload = QueuedResumeUpload(item["filename"], item["file_bytes"], item.get("content_type") or bulk_content_type(item["filename"]))
+            if item.get("file_path"):
+                upload = QueuedResumeFileUpload(item["filename"], item["file_path"], item.get("content_type") or bulk_content_type(item["filename"]))
+            else:
+                upload = QueuedResumeUpload(item["filename"], item["file_bytes"], item.get("content_type") or bulk_content_type(item["filename"]))
             result = await process_stored_resume(jd, upload, user_snapshot)
             score = NumberLike(result.get("ats", {}).get("ats_score") or result.get("score") or 0)
+            candidate_status = "shortlisted" if result.get("decision") in {"Selected", "Shortlist", "Shortlisted"} else "rejected" if result.get("decision") == "Rejected" else "review"
+            interview_ready = score >= 75 and result.get("decision") != "Rejected"
             update = {
                 "status": "completed",
                 "parsing_status": result.get("resume_file", {}).get("parsing_status", "completed"),
                 "score": result.get("score", 0),
                 "ats_score": score,
                 "decision": result.get("decision"),
-                "candidate_status": "shortlisted" if result.get("decision") in {"Selected", "Shortlist", "Shortlisted"} else "rejected" if result.get("decision") == "Rejected" else "review",
+                "candidate_status": candidate_status,
                 "skills": result.get("skills", []),
                 "summary": result.get("summary", ""),
                 "ats": result.get("ats", {}),
                 "resume_file": result.get("resume_file", {}),
                 "candidate_id": result.get("resume_file", {}).get("candidate_id"),
-                "interview_ready": score >= 75 and result.get("decision") != "Rejected",
+                "interview_ready": interview_ready,
                 "duration_seconds": round(time.perf_counter() - started, 2),
                 "completed_at": now_iso(),
                 "updated_at": now_iso(),
             }
-            await db.ats_batch_items.update_one({"_id": item_id}, {"$set": update, "$unset": {"file_bytes": ""}})
+            await db.ats_batch_items.update_one({"_id": item_id}, {"$set": update, "$unset": {"file_bytes": "", "file_path": ""}})
+            inc = {"processed": 1, "pending": -1}
+            if candidate_status == "shortlisted":
+                inc["shortlisted"] = 1
+            elif candidate_status == "rejected":
+                inc["rejected"] = 1
+            else:
+                inc["review"] = 1
+            if interview_ready:
+                inc["interview_ready"] = 1
+            await db.ats_batches.update_one({"batch_id": batch_id}, {"$inc": inc, "$set": {"status": "processing", "updated_at": now_iso()}})
         except Exception as exc:
             await db.ats_batch_items.update_one(
                 {"_id": item_id},
-                {"$set": {"status": "failed", "parsing_status": "failed", "error": str(exc) if DEV_MODE else "AI Processing Error", "duration_seconds": round(time.perf_counter() - started, 2), "updated_at": now_iso()}, "$unset": {"file_bytes": ""}},
+                {"$set": {"status": "failed", "parsing_status": "failed", "error": str(exc) if DEV_MODE else "AI Processing Error", "duration_seconds": round(time.perf_counter() - started, 2), "updated_at": now_iso()}, "$unset": {"file_bytes": "", "file_path": ""}},
             )
-        await refresh_ats_batch(batch_id)
+            await db.ats_batches.update_one({"batch_id": batch_id}, {"$inc": {"failed": 1, "pending": -1}, "$set": {"status": "processing", "updated_at": now_iso()}})
+        finally:
+            cleanup_staged_resume(item.get("file_path"))
+        batch = await db.ats_batches.find_one({"batch_id": batch_id}, {"total": 1, "processed": 1, "failed": 1, "completed_at": 1})
+        if batch and numeric(batch.get("processed")) + numeric(batch.get("failed")) >= numeric(batch.get("total")):
+            final_status = "failed" if numeric(batch.get("failed")) and not numeric(batch.get("processed")) else "completed"
+            await db.ats_batches.update_one({"batch_id": batch_id}, {"$set": {"status": final_status, "completed_at": batch.get("completed_at") or now_iso(), "updated_at": now_iso()}})
         cache_delete_prefix("ats:")
         cache_delete_prefix("bi:")
         cache_delete_prefix("summary:")
@@ -2171,7 +2260,7 @@ async def upload_resume_batch(
         raise HTTPException(status_code=400, detail="Upload at least one resume file.")
     batch_id = uuid.uuid4().hex
     owner = current_user_email(user)
-    expanded_files = await expand_bulk_resume_uploads(files)
+    expanded_files = await expand_bulk_resume_uploads(files, batch_id)
     if not expanded_files:
         raise HTTPException(status_code=400, detail="No supported resume files were found.")
     created_at = now_iso()
@@ -2190,7 +2279,7 @@ async def upload_resume_batch(
         if item.get("status") == "failed":
             failed_seed.append({**base_doc, "status": "failed", "parsing_status": "failed", "error": item.get("error", "Invalid resume file.")})
             continue
-        queued.append({**base_doc, "status": "queued", "parsing_status": "queued", "content_type": item.get("content_type"), "file_bytes": item.get("file_bytes", b"")})
+        queued.append({**base_doc, "status": "queued", "parsing_status": "queued", "content_type": item.get("content_type"), "file_path": item.get("file_path")})
     if queued or failed_seed:
         await db.ats_batch_items.insert_many(queued + failed_seed)
     await db.ats_batches.insert_one({
@@ -2206,7 +2295,9 @@ async def upload_resume_batch(
         "processed": 0,
         "failed": len(failed_seed),
         "shortlisted": 0,
+        "review": 0,
         "rejected": 0,
+        "interview_ready": 0,
         "pending": len(queued),
         "created_at": created_at,
         "updated_at": created_at,

@@ -6,6 +6,7 @@ import api from '../services/api';
 import Topbar from '../components/Topbar';
 
 const chartColors = ['#06B6D4', '#2563EB', '#7C3AED', '#10B981', '#F59E0B', '#F43F5E'];
+const BATCH_VISIBLE_LIMIT = 250;
 
 const emptyJob = {
   title: '',
@@ -214,7 +215,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
     if (!files.length || !jd.trim()) return;
     setLoading(true);
     setBatchSummary(null);
-    setBatchResults(files.map((file) => ({
+    setBatchResults(files.slice(0, BATCH_VISIBLE_LIMIT).map((file) => ({
       id: `${file.name}-${file.size}`,
       name: file.name,
       upload: 12,
@@ -384,7 +385,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
             <input type="file" accept=".pdf,.docx,.zip" multiple className="absolute h-0 w-0 opacity-0" onChange={(event) => addFiles(event.target.files)} />
             <UploadCloud className="text-cyan-500" size={30} />
             <p className="mt-3 text-sm font-black text-slate-950 dark:text-white">{files.length ? `${files.length} files queued` : 'Drag resumes here or click to upload'}</p>
-            <p className="mt-1 text-xs text-slate-500">ZIP archives are expanded into queued PDF/DOCX screening jobs.</p>
+            <p className="mt-1 text-xs text-slate-500">ZIP archives are expanded into queued PDF/DOCX screening jobs. Supports 5000+ resumes per batch.</p>
           </label>
 
           <div className="mt-4 grid grid-cols-4 gap-2">
@@ -402,7 +403,7 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
           </div>
 
           <div className="mt-5 max-h-[430px] space-y-3 overflow-y-auto pr-1">
-            {(batchResults.length ? batchResults : files.map((file) => ({ id: `${file.name}-${file.size}`, name: file.name, upload: 0, parsing: 0, screening: 0, status: 'Queued' }))).map((item) => (
+            {(batchResults.length ? batchResults : files.slice(0, BATCH_VISIBLE_LIMIT).map((file) => ({ id: `${file.name}-${file.size}`, name: file.name, upload: 0, parsing: 0, screening: 0, status: 'Queued' }))).map((item) => (
               <div key={item.id} className="rounded-lg border border-slate-200 bg-white/80 p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -418,6 +419,11 @@ export default function ResumeScreeningPage({ mode = 'screening' }) {
                 </div>
               </div>
             ))}
+            {(files.length > BATCH_VISIBLE_LIMIT || totals.uploaded > BATCH_VISIBLE_LIMIT) && (
+              <div className="rounded-lg border border-slate-200 bg-white/80 p-4 text-center text-xs font-bold text-slate-500 dark:border-white/10 dark:bg-white/[0.04]">
+                Showing {BATCH_VISIBLE_LIMIT} visible queue rows. Full batch totals and ranking continue updating above.
+              </div>
+            )}
             {!files.length && !batchResults.length && <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-white/10">No resumes queued yet.</div>}
           </div>
 
