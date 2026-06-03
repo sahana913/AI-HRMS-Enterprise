@@ -4,6 +4,7 @@ import re
 import shutil
 import io
 import hashlib
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from database.connection import db
@@ -36,6 +37,15 @@ def safe_filename_part(value: str) -> str:
     return cleaned[:80] or "resume"
 
 
+def is_valid_resume_signature(filename: str, file_bytes: bytes) -> bool:
+    extension = Path(filename or "").suffix.lower()
+    if extension == ".pdf":
+        return file_bytes.lstrip()[:5] == b"%PDF-"
+    if extension == ".docx":
+        return zipfile.is_zipfile(io.BytesIO(file_bytes))
+    return False
+
+
 async def save_legacy_resume_file(file_bytes: bytes, filename: str, user_email: str):
     ensure_upload_directories()
     extension = Path(filename or "").suffix.lower()
@@ -45,7 +55,7 @@ async def save_legacy_resume_file(file_bytes: bytes, filename: str, user_email: 
         raise ValueError("Resume file is empty.")
     if len(file_bytes) > MAX_RESUME_FILE_SIZE:
         raise ValueError("Resume file exceeds the maximum size.")
-    if b"\x00" in file_bytes[:2048]:
+    if not is_valid_resume_signature(filename, file_bytes):
         raise ValueError("Resume file looks unsafe and was rejected.")
 
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")

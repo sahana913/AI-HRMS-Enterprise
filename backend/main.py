@@ -497,6 +497,14 @@ def validate_resume_upload(upload: UploadFile):
         raise HTTPException(status_code=400, detail="Executable uploads are not allowed.")
 
 
+def validate_resume_file_signature(filename: str, file_bytes: bytes):
+    extension = Path(filename or "").suffix.lower()
+    if extension == ".pdf" and not file_bytes.lstrip()[:5] == b"%PDF-":
+        raise HTTPException(status_code=400, detail=f"{filename} is not a valid PDF resume.")
+    if extension == ".docx" and not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        raise HTTPException(status_code=400, detail=f"{filename} is not a valid DOCX resume.")
+
+
 async def save_resume_upload(upload: UploadFile, owner: str) -> dict:
     validate_resume_upload(upload)
     original_filename = upload.filename or "resume"
@@ -505,8 +513,7 @@ async def save_resume_upload(upload: UploadFile, owner: str) -> dict:
         raise HTTPException(status_code=400, detail=f"{original_filename} is empty.")
     if len(file_bytes) > MAX_RESUME_FILE_SIZE:
         raise HTTPException(status_code=413, detail=f"{original_filename} exceeds the maximum resume size.")
-    if b"\x00" in file_bytes[:2048]:
-        raise HTTPException(status_code=400, detail=f"{original_filename} looks unsafe and was rejected.")
+    validate_resume_file_signature(original_filename, file_bytes)
 
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     unique_id = uuid.uuid4().hex[:12]
